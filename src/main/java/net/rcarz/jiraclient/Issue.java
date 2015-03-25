@@ -20,12 +20,9 @@
 package net.rcarz.jiraclient;
 
 import java.io.File;
+import java.io.InputStream;
 import java.net.URI;
-import java.util.ArrayList;
-import java.util.Date;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 import net.sf.json.JSON;
 import net.sf.json.JSONArray;
@@ -278,47 +275,37 @@ public class Issue extends Resource {
     public final class FluentTransition {
 
         Map<String, Object> fields = new HashMap<String, Object>();
-        JSONArray transitions = null;
+        List<Transition> transitions = null;
 
-        private FluentTransition(JSONArray transitions) {
+        private FluentTransition(List<Transition> transitions) {
             this.transitions = transitions;
         }
 
-        private JSONObject getTransition(String id, boolean name) throws JiraException {
-            JSONObject result = null;
+        private Transition getTransition(String id, boolean name) throws JiraException {
+            Transition result = null;
 
-            for (Object item : transitions) {
-                if (!(item instanceof JSONObject) || !((JSONObject)item).containsKey("id"))
-                    throw new JiraException("Transition metadata is malformed");
-
-                JSONObject t = (JSONObject)item;
-
-                if ((!name && Field.getString(t.get("id")).equals(id)) ||
-                    (name && Field.getString(t.get("name")).equals(id))) {
-
-                    result = t;
-                    break;
+            for (Transition transition : transitions) {
+                if((name && id.equals(transition.getName())
+                || (!name && id.equals(transition.getId())))){
+                    result = transition;
                 }
             }
 
             if (result == null)
-                throw new JiraException("Transition was not found in metadata");
+                throw new JiraException("Transition was not found.");
 
             return result;
         }
 
-        private void realExecute(JSONObject trans) throws JiraException {
+        private void realExecute(Transition trans) throws JiraException {
 
-            if (trans.isNullObject() || !trans.containsKey("fields") ||
-                    !(trans.get("fields") instanceof JSONObject))
-                throw new JiraException("Transition metadata is missing fields");
+            if (trans == null || trans.getFields() == null)
+                throw new JiraException("Transition is missing fields");
 
-            JSONObject editmeta = (JSONObject)trans.get("fields");
             JSONObject fieldmap = new JSONObject();
 
             for (Map.Entry<String, Object> ent : fields.entrySet()) {
-                Object newval = Field.toJson(ent.getKey(), ent.getValue(), editmeta);
-                fieldmap.put(ent.getKey(), newval);
+                fieldmap.put(ent.getKey(), ent.getValue());
             }
 
             JSONObject req = new JSONObject();
@@ -327,7 +314,7 @@ public class Issue extends Resource {
                 req.put("fields", fieldmap);
 
             JSONObject t = new JSONObject();
-            t.put("id", Field.getString(trans.get("id")));
+            t.put("id", Field.getString(trans.getId()));
 
             req.put("transition", t);
 
@@ -347,6 +334,17 @@ public class Issue extends Resource {
          */
         public void execute(int id) throws JiraException {
             realExecute(getTransition(Integer.toString(id), false));
+        }
+
+        /**
+         * Executes the transition action.
+         *
+         * @param transition Transition
+         *
+         * @throws JiraException when the transition fails
+         */
+        public void execute(Transition transition) throws JiraException {
+            realExecute(transition);
         }
 
         /**
@@ -382,6 +380,57 @@ public class Issue extends Resource {
         public int max = 0;
         public int total = 0;
         public List<Issue> issues = null;
+    }
+
+    public static final class NewAttachment {
+
+        private final String filename;
+        private final Object content;
+
+        public NewAttachment(File content) {
+            this(content.getName(), content);
+        }
+
+        public NewAttachment(String filename, File content) {
+            this.filename = requireFilename(filename);
+            this.content = requireContent(content);
+        }
+
+        public NewAttachment(String filename, InputStream content) {
+            this.filename = requireFilename(filename);
+            this.content = requireContent(content);
+        }
+
+        public NewAttachment(String filename, byte[] content) {
+            this.filename = requireFilename(filename);
+            this.content = requireContent(content);
+        }
+
+        String getFilename() {
+            return filename;
+        }
+
+        Object getContent() {
+            return content;
+        }
+
+        private static String requireFilename(String filename) {
+            if (filename == null) {
+                throw new NullPointerException("filename may not be null");
+            }
+            if (filename.length() == 0) {
+                throw new IllegalArgumentException("filename may not be empty");
+            }
+            return filename;
+        }
+
+        private static Object requireContent(Object content) {
+            if (content == null) {
+                throw new NullPointerException("content may not be null");
+            }
+            return content;
+        }
+
     }
 
     private String key = null;
@@ -537,7 +586,7 @@ public class Issue extends Resource {
         return (JSONObject)jo.get("fields");
     }
 
-    private JSONArray getTransitions() throws JiraException {
+    public List<Transition> getTransitions() throws JiraException {
         JSON result = null;
 
         try {
@@ -555,9 +604,17 @@ public class Issue extends Resource {
 
         if (jo.isNullObject() || !jo.containsKey("transitions") ||
                 !(jo.get("transitions") instanceof JSONArray))
-            throw new JiraException("Transition metadata is missing from jos");
+            throw new JiraException("Transition metadata is missing.");
 
-        return (JSONArray)jo.get("transitions");
+        JSONArray transitions = (JSONArray) jo.get("transitions");
+
+        List<Transition> trans = new ArrayList<Transition>();
+        for(Object obj: transitions){
+            JSONObject ob = (JSONObject) obj;
+            trans.add(new Transition(restclient, ob));
+        }
+
+        return trans;
     }
 
     /**
@@ -565,11 +622,58 @@ public class Issue extends Resource {
      *
      * @param file java.io.File
      *
-     * @throws JiraException when the comment creation fails
+     * @throws JiraException when the attachment creation fails
      */
     public void addAttachment(File file) throws JiraException {
         try {
             restclient.post(getRestUri(key) + "/attachments", file);
+        } catch (Exception ex) {
+            throw new JiraException("Failed add attachment to issue " + key, ex);
+        }
+    }
+    
+    /**
+     * Adds a remote link to this issue.
+     *
+     * @param url Url of the remote link
+     * @param title Title of the remote link
+     * @param summary Summary of the remote link
+     *
+     * @throws JiraException when the link creation fails
+     */
+    public void addRemoteLink(String url, String title, String summary) throws JiraException {
+        JSONObject req = new JSONObject();
+        JSONObject obj = new JSONObject();
+        
+        obj.put("url", url);
+        obj.put("title", title);
+        obj.put("summary", summary);
+        
+        req.put("object", obj);
+
+        try {
+            restclient.post(getRestUri(key) + "/remotelink", req);
+        } catch (Exception ex) {
+            throw new JiraException("Failed add remote link to issue " + key, ex);
+        }
+    }
+
+    /**
+     * Adds an attachments to this issue.
+     *
+     * @param attachments  the attachments to add
+     *
+     * @throws JiraException when the attachments creation fails
+     */
+    public void addAttachments(NewAttachment... attachments) throws JiraException {
+        if (attachments == null) {
+            throw new NullPointerException("attachments may not be null");
+        }
+        if (attachments.length == 0) {
+            return;
+        }
+        try {
+            restclient.post(getRestUri(key) + "/attachments", attachments);
         } catch (Exception ex) {
             throw new JiraException("Failed add attachment to issue " + key, ex);
         }
